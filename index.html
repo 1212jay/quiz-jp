@@ -809,6 +809,7 @@
     // Constants
     // =========================================================================
     const TEXT_MODEL = 'gemini-3.8-flash';
+    const TEXT_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
     const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
     const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -816,6 +817,8 @@
     const GEMINI_BATCH_TIMEOUT_MS = 90000;
     const GEMINI_TTS_TIMEOUT_MS = 45000;
     const GITHUB_TIMEOUT_MS = 20000;
+    const GEMINI_MAX_RETRIES = 4;
+    const GEMINI_FALLBACK_MAX_RETRIES = 2;
 
     const GIST_FILENAME = 'jp-master-sync-data.json';
     const DELETED_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -1355,8 +1358,12 @@
     async function fetchGeminiApi(
       model,
       payload,
-      maxRetries = MAX_API_RETRIES,
-      { silentNoKey = false, timeoutMs = (model === TTS_MODEL ? GEMINI_TTS_TIMEOUT_MS : GEMINI_TIMEOUT_MS) } = {}
+      maxRetries = GEMINI_MAX_RETRIES,
+      {
+        silentNoKey = false,
+        timeoutMs = (model === TTS_MODEL ? GEMINI_TTS_TIMEOUT_MS : GEMINI_TIMEOUT_MS),
+        allowFallback = true
+      } = {}
     ) {
       const apiKey = getApiKey();
       if (!apiKey) {
@@ -1432,9 +1439,32 @@
           if (err && err.status) lastError.status = err.status;
           if (err && err.code) lastError.code = err.code;
           if (attempt < maxRetries) {
-            const delay = 1000 * Math.pow(2, attempt) + Math.floor(Math.random() * 250);
+            const baseDelay = err && err.status === 503 ? 2000 : 1000;
+            const delay = Math.min(30000, baseDelay * Math.pow(2, attempt)) + Math.floor(Math.random() * 500);
             await sleep(delay);
             continue;
+          }
+          if (allowFallback && model === TEXT_MODEL && lastError.status === 503) {
+            try {
+              const fallbackPayload = JSON.parse(JSON.stringify(payload));
+              const thinkingConfig = fallbackPayload?.generationConfig?.thinkingConfig;
+              if (thinkingConfig && Object.prototype.hasOwnProperty.call(thinkingConfig, 'thinkingBudget')) {
+                delete thinkingConfig.thinkingBudget;
+                thinkingConfig.thinkingLevel = 'minimal';
+              }
+              showToast('主要模型目前繁忙，正在改用備援模型重試。', 'info');
+              return await fetchGeminiApi(TEXT_FALLBACK_MODEL, fallbackPayload, GEMINI_FALLBACK_MAX_RETRIES, {
+                silentNoKey,
+                timeoutMs,
+                allowFallback: false
+              });
+            } catch (fallbackError) {
+              const combinedError = new Error(
+                `Gemini 主模型與備援模型目前都無法完成請求。主模型：${lastError.message}；備援模型：${sanitizeSensitiveText(fallbackError instanceof Error ? fallbackError.message : String(fallbackError))}`
+              );
+              combinedError.status = fallbackError?.status || lastError.status;
+              throw combinedError;
+            }
           }
           throw lastError;
         }
@@ -1560,7 +1590,7 @@
           }
         };
 
-        const data = await fetchGeminiApi(TTS_MODEL, payload, MAX_API_RETRIES, {
+        const data = await fetchGeminiApi(TTS_MODEL, payload, GEMINI_MAX_RETRIES, {
           silentNoKey: isAutoPlay,
           timeoutMs: GEMINI_TTS_TIMEOUT_MS
         });
@@ -2786,7 +2816,7 @@ ${JSON.stringify(newTerms)}`;
             temperature: 0.2,
             thinkingConfig: { thinkingBudget: 0 }
           }
-        }, 1, { timeoutMs: GEMINI_BATCH_TIMEOUT_MS });
+        }, GEMINI_MAX_RETRIES, { timeoutMs: GEMINI_BATCH_TIMEOUT_MS });
 
         const parsed = parseJsonFromGeminiText(extractTextFromGeminiResponse(res));
         if (!Array.isArray(parsed)) throw new Error('AI 回傳格式非陣列');
