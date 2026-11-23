@@ -813,6 +813,7 @@
     const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
     const GEMINI_TIMEOUT_MS = 30000;
+    const GEMINI_BATCH_TIMEOUT_MS = 90000;
     const GEMINI_TTS_TIMEOUT_MS = 45000;
     const GITHUB_TIMEOUT_MS = 20000;
 
@@ -2785,7 +2786,7 @@ ${JSON.stringify(newTerms)}`;
             temperature: 0.2,
             thinkingConfig: { thinkingBudget: 0 }
           }
-        });
+        }, 1, { timeoutMs: GEMINI_BATCH_TIMEOUT_MS });
 
         const parsed = parseJsonFromGeminiText(extractTextFromGeminiResponse(res));
         if (!Array.isArray(parsed)) throw new Error('AI 回傳格式非陣列');
